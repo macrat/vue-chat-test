@@ -1,0 +1,303 @@
+<!doctype html>
+
+<html>
+<head>
+	<script src="https://unpkg.com/vue/dist/vue.min.js"></script>
+	<script src="https://cdn.auth0.com/js/lock/10.22.0/lock.min.js"></script>
+
+	<script src="/socket.io/socket.io.js"></script>
+
+	<style>
+img {
+	width: 2em;
+	height: 2em;
+}
+body {
+	margin: 0;
+}
+#app {
+	display: flex;
+	height: 100vh;
+}
+
+nav {
+	margin: .5em;
+	background-color: white;
+	flex-shrink: 0;
+	flex-grow: 0;
+	padding: 1em .5em;
+	border-right: 1px solid gray;
+}
+
+nav a {
+	display: block;
+	font-size: 300%;
+	color: black;
+	text-decoration: none;
+	margin: .4em 0;
+}
+
+main {
+	display: flex;
+	overflow: auto;
+	align-items: center;
+}
+
+.column {
+	border: 1px solid gray;
+	height: 90vh;
+	width: 30em;
+	margin: .5em;
+	flex-grow: 0;
+	flex-shrink: 0;
+}
+
+.room {
+	display: flex;
+	height: 100%;
+	width: 100%;
+	flex-direction: column;
+}
+
+.messages {
+	flex-grow: 1;
+	overflow: auto;
+	margin: .2em .5em;
+}
+
+.message  {
+	display: flex;
+	margin: .5em 0;
+}
+
+.message > div {
+	margin-left: 1em;
+}
+
+.message span {
+	display: block;
+}
+
+.name {
+	color: gray;
+}
+
+.room > form {
+	display: flex;
+	flex-shrink: 0;
+}
+
+.header {
+	font-size: 200%;
+	text-align: center;
+	margin: 0 2em;
+	border-bottom: 1px solid lightgray;
+}
+
+.messageInput {
+	flex-grow: 1;
+}
+
+#new-room {
+	display: flex;
+	justify-content: center;
+	align-items: center;
+}
+	</style>
+</head>
+
+<body>
+	<div id=app>
+		<nav>
+			<a v-for="(room, idx) in rooms" href @click.prevent="scrollTo(idx)">{{ room.name.slice(0, 1) }}</a>
+		</nav>
+
+		<main>
+			<div v-for="room in rooms" class=column>
+				<chat-room :room="room" />
+			</div>
+			<div class=column id=new-room>
+				<form @submit.prevent=makeRoom>
+					<input v-model=newRoomName placeholder="new room">
+					<input type=submit value="+" tabindex=-1>
+				</form>
+			</div>
+		</main>
+	</div>
+</body>
+
+<script>
+Vue.component('chat-room', {
+	props: ["room"],
+	data() {
+		return {
+			messageInput: '',
+		};
+	},
+	template: `
+		<div class=room>
+			<div class=header>
+				{{ room.name }}
+			</div>
+			<div class=messages>
+				<div v-for="message in room.messages" class=message>
+					<img :src="message.profile.picture">
+					<div>
+						<span class=name>{{ message.profile.name }}</span>
+						<span class=text>{{ message.text }}</span>
+					</div>
+				</div>
+			</div>
+			<form @submit.prevent="send">
+				<input class=messageInput v-model="messageInput" :disabled="!$root.connected">
+				<input type=submit :disabled="!$root.connected" tabindex=-1>
+			</form>
+		</div>
+	`,
+	methods: {
+		send() {
+			if (this.room.name && this.messageInput) {
+				this.$root.send(this.room.name, this.messageInput);
+				this.messageInput = '';
+			}
+		},
+	},
+});
+
+const vm = new Vue({
+	el: '#app',
+	data: {
+		rooms: [],
+		socket: null,
+		newRoomName: '',
+	},
+	computed: {
+		connected() {
+			return this.socket != null;
+		},
+	},
+	methods: {
+		join(name) {
+			if (!(name in this.rooms)) {
+				this.rooms.push({
+					name: name,
+					messages: [],
+				});
+				this.socket.emit('join', { room: name });
+				Vue.nextTick(() => {
+					this.scrollTo(this.rooms.length - 1);
+				});
+			}
+		},
+		send(room, message) {
+			this.socket.emit('say', {
+				room: room,
+				text: message,
+			});
+		},
+		getRoom(name) {
+			for (var id in this.rooms) {
+				if (this.rooms[id].name == name) {
+					return this.rooms[id];
+				}
+			}
+			return null;
+		},
+		getRoomIdx(name) {
+			for (var id in this.rooms) {
+				if (this.rooms[id].name == name) {
+					return Number.parseInt(id);
+				}
+			}
+			return null;
+		},
+		makeRoom() {
+			if (this.newRoomName) {
+				const idx = this.getRoomIdx(this.newRoomName)
+				if (idx == null) {
+					this.join(this.newRoomName);
+				} else {
+					this.scrollTo(idx);
+				}
+				this.newRoomName = '';
+			}
+		},
+		scrollTo(idx) {
+			const item = document.querySelector(`.column:nth-child(${idx + 1})`);
+			document.querySelector('main').scrollBy(item.getBoundingClientRect().left - 100, 0);
+			item.querySelector('.messageInput').focus();
+		},
+	},
+});
+
+const lock = new Auth0Lock(AUTH0_CLIENT_ID, AUTH0_DOMAIN, {
+	auth: {
+		responseType: 'token id_token',
+		params: {
+			scope: 'openid profile email',
+		},
+	},
+});
+lock.on('authenticated', result => {
+	localStorage.setItem('jwt', result.idToken);
+	login(result.idToken);
+});
+lock.on('authorization_error', error => {
+	console.error('authorization error: ', error);
+});
+
+function login(jwt) {
+	lock.getProfile(jwt, (error, profile) => {
+		if (error) {
+			console.error(error);
+			localStorage.removeItem('jwt');
+			return;
+		}
+
+		const socket = io();
+		socket.on('connect', () => {
+			console.log('connected');
+
+			socket
+				.emit('authenticate', { token: jwt })
+				.on('authenticated', () => {
+					console.log('logged in!');
+
+					socket
+						.on('joined', msg => {
+							console.log('joined', msg);
+							vm.getRoom(msg.room).messages.push({
+								profile: msg.profile,
+								text: '--joined--',
+							});
+						})
+						.on('say', msg => {
+							console.log('said', msg);
+							vm.getRoom(msg.room).messages.push({
+								profile: msg.profile,
+								text: msg.text,
+							});
+						})
+
+					vm.socket = socket;
+
+					vm.join('general');
+				})
+				.on('unauthorized', msg => {
+					console.error('unauthorized: ', msg.data);
+					lock.show();
+				})
+		});
+
+		lock.hide();
+	});
+}
+
+const jwt = localStorage.getItem('jwt');
+if (jwt) {
+	login(jwt);
+} else {
+	lock.show();
+}
+</script>
+</html>
